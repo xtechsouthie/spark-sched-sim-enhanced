@@ -45,55 +45,32 @@ class Critic:
         self.returns_std = None
         self.training_losses = []
 
-    def __call__(self, ts_list, ys_list):
-        baseline_list = []
-        for j in range(self.num_sequences):
-            start = j * self.num_rollouts
-            end = start + self.num_rollouts
+    def __call__(self, ts_list, all_returns, all_obs):
+        assert len(all_obs) == len(all_returns) == len(ts_list), \
+            f"Length mismatch between obs:{len(all_obs)}, returns:{len(all_returns)}, times:{len(ts_list)}"
 
-            sequence_baselines = self.predict_sequence(
-                ts_list[start:end], ys_list[start:end]
-            )
-
-            baseline_list += sequence_baselines
+        baseline_list = self.predict_sequence(ts_list, all_returns, all_obs)
         
         return baseline_list
     
-    def predict_sequence(self, ts_list, ys_list):
-        features_list = []
-        for rollout_idx, (ts, ys) in enumerate(zip(ts_list, ys_list)):
-            rollout_features = []
-            for t in ts:
-                features = [t]
-                if self.feature_extractor is not None:
-                    extra_features = self.feature_extractor(t, rollout_idx)
-                    features.extend(extra_features)
-                
-                if len(features) > self.input_dim:
-                    features = features[:self.input_dim]
-                if len(features) < self.input_dim:
-                    features.extend([0] * (self.input_dim - len(features)))
-
-                rollout_features.append(features)
-            features_list.append(np.array(rollout_features, dtype= np.float32))
-            
+    def predict_sequence(self, ts_list, ys_list, obs_list):
+        
+        features = self.extract_features_from_observations(obs_list, ts_list)
+        # add time as a feature in extract features from obs.
 
         baseline_list = []
 
-        for feature in features_list:
-            with torch.no_grad():
-                if self.state_mean is not None and self.state_std is not None:
-                    #yeh define karna hai dekhna padega
-                    feature = (feature - self.state_mean) / (self.state_std + 1e-8)
-                
-                print(f'shape of features going to the critic net in __call__ method are: [{feature.shape[0]}, {feature.shape[1]}]')
-                
-                feature_tensor = torch.FloatTensor(feature).to(self.device)
+        with torch.no_grad():
+            if self.state_mean is not None and self.state_std is not None:
+                features = (features - self.state_mean) / (self.state_std + 1e-8)
 
-                value = self.network(feature_tensor)
+            features_tensor = torch.FloatTensor(features).to(self.device)
 
-                baseline_list.append(value)
-        
+            values = self.network(features_tensor)
+            
+
+        baseline_list = values.squeeze(-1).cpu().tolist()
+
         return baseline_list
     
 

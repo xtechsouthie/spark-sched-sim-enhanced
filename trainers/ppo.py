@@ -113,16 +113,22 @@ class PPO(Trainer):
         if self.use_critic:
             obsns_list = data['obsns_list']
             returns_list = data['returns_list']
+
+            all_obs = []
+            all_returns = []
+            for obs_seq, returns_seq in zip(data['obsns_list'], data['returns_list']):
+                all_obs.extend(obs_seq)
+                all_returns.extend(returns_seq)
             
             ts_list = []
             for rollout_buffer in rollout_buffers:
                 if rollout_buffer is not None:
                     # Remove last timestamp (same as base class does)
-                    ts_list.append(rollout_buffer.wall_times[:-1])
+                    ts_list.extend(rollout_buffer.wall_times[:-1])
             
             # Use critic to get baselines
             if self.current_iteration >= self.critic_warmup_iterations:
-                critic_baselines_list = self.critic(ts_list, returns_list)
+                critic_baselines_list = self.critic(ts_list, all_returns, all_obs)
                 data['critic_baselines_list'] = critic_baselines_list
                 
                 if self.compare_baselines:
@@ -144,16 +150,78 @@ class PPO(Trainer):
 
         returns_flat = np.array(list(chain(*data["returns_list"])))
         returns = np.array([b.cpu().numpy() if torch.is_tensor(b) else b for b in returns_flat])
-        baselines = np.concatenate([b.cpu().numpy() if torch.is_tensor(b) else b for b in data['baselines_list']])
+        
+        # Handle baselines concatenation safely
+        baseline_arrays = []
+        for b in data['baselines_list']:
+            if torch.is_tensor(b):
+                arr = b.cpu().numpy()
+            else:
+                arr = np.array(b)
+            
+            # Ensure it's at least 1-dimensional
+            if arr.ndim == 0:
+                arr = np.array([arr])
+            elif arr.ndim > 1:
+                arr = arr.flatten()
+                
+            baseline_arrays.append(arr)
+        
+        if baseline_arrays:
+            baselines = np.concatenate(baseline_arrays)
+        else:
+            baselines = np.array([])
+
+        print(f'len of returns and baselines are : {len(returns)}, {len(baselines)}')
 
         advantages = returns - baselines
 
         if self.use_critic and 'critic_baselines_list' in data:
-            original_baselines = np.concatenate([b.cpu().numpy() if torch.is_tensor(b) else b for b in data['original_baselines_list']])
+            # Handle original baselines concatenation safely
+            original_baseline_arrays = []
+            for b in data['original_baselines_list']:
+                if torch.is_tensor(b):
+                    arr = b.cpu().numpy()
+                else:
+                    arr = np.array(b)
+                
+                # Ensure it's at least 1-dimensional
+                if arr.ndim == 0:
+                    arr = np.array([arr])
+                elif arr.ndim > 1:
+                    arr = arr.flatten()
+                    
+                original_baseline_arrays.append(arr)
+            
+            if original_baseline_arrays:
+                original_baselines = np.concatenate(original_baseline_arrays)
+            else:
+                original_baselines = np.array([])
+                
             original_advantages = returns - original_baselines
             original_advantage_var = np.var(original_advantages)
 
-            critic_baselines = np.concatenate([b.cpu().numpy() if torch.is_tensor(b) else b for b in data['critic_baselines_list']])
+            # Handle critic baselines concatenation safely
+            critic_baseline_arrays = []
+            for b in data['critic_baselines_list']:
+                if torch.is_tensor(b):
+                    arr = b.cpu().numpy()
+                else:
+                    arr = np.array(b)
+                
+                # Ensure it's at least 1-dimensional
+                if arr.ndim == 0:
+                    arr = np.array([arr])
+                elif arr.ndim > 1:
+                    arr = arr.flatten()
+                    
+                critic_baseline_arrays.append(arr)
+            
+            if critic_baseline_arrays:
+                critic_baselines = np.concatenate(critic_baseline_arrays)
+            else:
+                critic_baselines = np.array([])
+                
             critic_advantages = returns - critic_baselines
             critic_advantage_var = np.var(critic_advantages)
 

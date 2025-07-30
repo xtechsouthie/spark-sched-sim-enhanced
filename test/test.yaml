@@ -28,10 +28,10 @@ trainer:
   
   
   critic_input_dim: 16   
-  critic_hidden_dim1: 32 
-  critic_hidden_dim2: 16  
+  critic_hidden_dim1: 64 
+  critic_hidden_dim2: 32  
   critic_lr: 0.001      
-  critic_warmup_iterations: 20 
+  critic_warmup_iterations: 20
 
 agent:
   agent_cls: 'DecimaScheduler'
