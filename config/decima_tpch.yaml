@@ -1,13 +1,13 @@
 trainer:
   # where the training happens (cpu, cuda, cuda:0, ...)
   # note: rollouts are always collected using only the CPU
-  device: 'cuda'
+  device: 'cpu'
 
   # name of the trainer's class
   trainer_cls: 'PPO'
 
   # number of training iterations
-  num_iterations: 500
+  num_iterations: 100
 
   # number of unique job sequences sampled per training iteration
   num_sequences: 4
@@ -84,4 +84,5 @@ env:
   moving_delay: 2000.
   warmup_delay: 1000.
   dataset: 'tpch'
+  data_sampler_cls: 'TPCHDataSampler'
   mean_time_limit: 2.e+7

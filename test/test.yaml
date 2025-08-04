@@ -1,8 +1,9 @@
 trainer:
   trainer_cls: 'PPO'
-  num_iterations: 1
-  num_sequences: 1
-  num_rollouts: 2
+  num_iterations: 100
+  num_sequences: 2
+  num_rollouts: 10
+  num_episodes: 10
   seed: 42
   artifacts_dir: 'test/artifacts'
   checkpointing_freq: 50
@@ -17,6 +18,15 @@ trainer:
   opt_kwargs: 
     lr: 3.e-4
   max_grad_norm: .5
+  #### CRITIC NETWORK ####
+  use_meta_critic: True
+  compare_baselines: True
+  critic_warmup_iterations: 20
+  meta_input_dim: 16
+  meta_hidden_dim1: 64
+  meta_hidden_dim2: 32
+  meta_lr: 0.001
+  meta_inner_lr: 0.0003
 
 agent:
   agent_cls: 'DecimaScheduler'
@@ -33,7 +43,7 @@ agent:
 
 env:
   num_executors: 50
-  job_arrival_cap: 10
+  job_arrival_cap: 50
   moving_delay: 2000.
   mean_time_limit: 2.e+7
   job_arrival_rate: 4.e-5

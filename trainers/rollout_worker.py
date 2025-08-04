@@ -66,6 +66,7 @@ class RolloutWorker(ABC):
         self.base_seed = base_seed
         self.seed_step = seed_step
         self.reset_count = 0
+        self.episode_count = 0
 
         # log each of the processes to separate files
         sys.stdout = open(osp.join(stdout_dir, f"{rank}.out"), "a")
@@ -171,6 +172,8 @@ class RolloutWorkerAsync(RolloutWorker):
     def collect_rollout(self) -> RolloutBuffer:
         rollout_buffer = RolloutBuffer(async_rollouts=True)
 
+        self.episode_count = 0
+
         if self.reset_count == 0:
             self.next_obs, _ = self.env.reset(seed=self.seed)
             self.reset_count += 1
@@ -196,11 +199,14 @@ class RolloutWorkerAsync(RolloutWorker):
             if terminated or truncated:
                 self.next_obs, _ = self.env.reset(seed=self.seed)
                 self.reset_count += 1
+                self.episode_count += 1
                 self.next_wall_time = 0
                 rollout_buffer.add_reset(step)
 
             step += 1
 
         rollout_buffer.wall_times += [elapsed_time]
+
+        print(f'episode count in one async rollout: {self.episode_count}', file=sys.stderr, flush=True)
 
         return rollout_buffer

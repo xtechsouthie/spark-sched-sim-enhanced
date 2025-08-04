@@ -8,11 +8,14 @@ import sys
 from copy import deepcopy
 import json
 import pathlib
+import random
+from cfg_loader import load
 
 import numpy as np
 import torch
 import multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
+from spark_sched_sim import metrics
 
 from schedulers import make_scheduler, TrainableScheduler
 from .rollout_worker import RolloutWorkerSync, RolloutWorkerAsync, RolloutBuffer
@@ -20,6 +23,16 @@ from .utils import Baseline, ReturnsCalculator
 
 
 CfgType = dict[str, Any]
+
+ENV_CFG = {
+    "num_executors": 50,
+    "job_arrival_cap": 50,
+    "job_arrival_rate": 4.0e-5,
+    "moving_delay": 2000.0,
+    "warmup_delay": 1000.0,
+    "data_sampler_cls": "TPCHDataSampler",
+    "render_mode": "human",
+}
 
 
 class Trainer(ABC):
@@ -47,6 +60,9 @@ class Trainer(ABC):
 
         # number of rollouts per job sequence
         self.num_rollouts: int = int(train_cfg["num_rollouts"])
+        if self.num_rollouts % 2 != 0:
+            raise ValueError(f'num_rollouts must be even, got {self.num_rollouts}')
+            # needed to distribute into 2 for meta critic training.
 
         self.artifacts_dir: str = train_cfg["artifacts_dir"]
         pathlib.Path(self.artifacts_dir).mkdir(parents=True, exist_ok=True)
@@ -112,10 +128,10 @@ class Trainer(ABC):
 
             # gather
             results = []
-            for i, conn in enumerate(self.conns):
+            for worker_idx, conn in enumerate(self.conns):
                 res = conn.recv()
                 if isinstance(res, Exception):
-                    print(f"An exception occured in process {i}", flush=True)
+                    print(f"An exception occured in process {worker_idx}", flush=True)
                     exception = res
                     break
                 results += [res]
@@ -215,7 +231,7 @@ class Trainer(ABC):
         # logging
         shutil.rmtree(self.stdout_dir, ignore_errors=True)
         os.mkdir(self.stdout_dir)
-        sys.stdout = open(osp.join(self.stdout_dir, "main.out"), "a")
+        #sys.stdout = open(osp.join(self.stdout_dir, "main.out"), "a")
 
         if self.use_tensorboard:
             self.summary_writer = SummaryWriter(self.tb_dir)
@@ -225,7 +241,13 @@ class Trainer(ABC):
         os.mkdir(self.checkpointing_dir)
 
         # torch
-        torch.multiprocessing.set_start_method("spawn")
+        try:
+            torch.multiprocessing.set_start_method("spawn")
+        except RuntimeError as e:
+            if "context has already been set" in str(e):
+                print("DEBUG: Multiprocessing context already set, skipping", flush=True)
+            else:
+                raise e
         # print('cuda available:', torch.cuda.is_available())
         # torch.autograd.set_detect_anomaly(True)
 
@@ -327,3 +349,159 @@ class Trainer(ABC):
 
         for name, stat in episode_stats.items():
             self.summary_writer.add_scalar(name, stat, epoch)
+
+
+    def train_and_compare_models(self, train_cfg: dict, agent_cfg: dict, env_cfg: dict) -> dict:
+        print('Training and comparing two models: with and without meta critic')
+
+        original_use_critic = train_cfg.get('use_meta_critic', False)
+        original_artifacts_dir = train_cfg.get('artifacts_dir', 'artifacts')
+        num_episodes = train_cfg.get('num_episodes')
+        from trainers import make_trainer
+
+        results = {}
+
+        print('\n------Training model without critic------')
+        cfg_without_critic = {
+            'trainer': train_cfg.copy(),
+            'agent': agent_cfg.copy(),
+            'env': env_cfg.copy()
+        }
+        cfg_without_critic['trainer']['use_meta_critic'] = False
+        cfg_without_critic['trainer']['artifacts_dir'] = f'{original_artifacts_dir}/no_meta_critic'
+
+        trainer_without_critic = make_trainer(cfg_without_critic)
+        trainer_without_critic.train()
+
+        without_critic_model_path = f'{cfg_without_critic["trainer"]["artifacts_dir"]}/checkpoints/final_no_meta_critic.pt'
+        trainer_without_critic.save(without_critic_model_path)
+
+        print('\n------Training model with critic-------')
+        cfg_with_critic = {
+            'trainer': train_cfg.copy(),
+            'agent': agent_cfg.copy(),
+            'env': env_cfg.copy()
+        }
+        cfg_with_critic['trainer']['use_meta_critic'] = True
+        cfg_with_critic['trainer']['artifacts_dir'] = f'{original_artifacts_dir}/with_meta_critic'
+
+        trainer_with_critic = make_trainer(cfg_with_critic)
+        trainer_with_critic.train()
+
+        with_critic_model_path = f'{cfg_with_critic["trainer"]["artifacts_dir"]}/checkpoints/final_with_meta_critic.pt'
+        trainer_with_critic.save(with_critic_model_path)
+
+        print('\n------Evaluating both models now-------')
+
+        print('------Evaluationg original model-----------')
+
+        original_cfg = load(filename=osp.join("config", "decima_tpch.yaml"))
+
+        original_agent_cfg = original_cfg["agent"] | {
+            "num_executors": ENV_CFG["num_executors"],
+            "state_dict_path": osp.join("models", "decima", "model.pt"),
+        }
+
+        scheduler_original = make_scheduler(original_agent_cfg)
+
+        print("Example: Decima")
+
+        print("Running episode...")
+        results['original_model'] = self._evaluate_single_model(scheduler_original, env_cfg, num_episodes)
+
+
+        print('------Evaluating model trained WITHOUT critic-------')
+        # Need to include num_executors from env_cfg for scheduler creation
+        eval_agent_cfg = agent_cfg.copy()
+        eval_agent_cfg['num_executors'] = env_cfg['num_executors']
+        
+        scheduler_without_critic = make_scheduler(eval_agent_cfg)
+        scheduler_without_critic.load_state_dict(torch.load(without_critic_model_path, map_location=self.device))
+        scheduler_without_critic.eval()
+
+        results['without_critic'] = self._evaluate_single_model(scheduler_without_critic, env_cfg, num_episodes)
+
+        print('--------Evaluating model trained WITH critic---------')
+        scheduler_with_critic = make_scheduler(eval_agent_cfg)
+        scheduler_with_critic.load_state_dict(torch.load(with_critic_model_path, map_location=self.device))
+        scheduler_with_critic.eval()
+
+        results['with_critic'] = self._evaluate_single_model(scheduler_with_critic, env_cfg, num_episodes)
+
+        #Comparing the results
+        original_model_duration = results["original_model"]['avg_job_duration']
+        without_critic_duration = results["without_critic"]['avg_job_duration']
+        with_critic_duration = results["with_critic"]['avg_job_duration']
+        critic_improvement_over_original = ((original_model_duration - with_critic_duration)/ original_model_duration) * 100
+        no_critic_improvement_over_original = ((original_model_duration - without_critic_duration)/original_model_duration) * 100
+        improvement = ((without_critic_duration - with_critic_duration) / without_critic_duration) * 100
+
+        results['comparison'] = {
+            'without_critic_avg_duration': without_critic_duration,
+            'with_critic_avg_duration': with_critic_duration,
+            'absolute_improvement': without_critic_duration - with_critic_duration,
+            'percentage_improvement': improvement,
+            'critic_improvement_over_original': critic_improvement_over_original,
+            'no_critic_improvement_over_original': no_critic_improvement_over_original,
+            'better_method_bw_critic_baseline': 'CRITIC' if improvement > 0 else 'BASELINE',
+            'better_method_bw_critic_original': 'CRITIC' if critic_improvement_over_original > 0 else 'ORIGINAL',
+        }
+
+        print('\n -----------COMPARISON RESULTS-----------')
+        print(f"\nNo critic model avg job duration: {without_critic_duration:.3f}s")
+        print(f"With critic model avg job duration: {with_critic_duration:.3f}s")
+        print(f"original model avg job duration: {original_model_duration:.3f}s")
+        print(f"\nImprovement of CRITIC over BASELINE: {improvement:.2f}%")
+        print(f"Improvement of CRITIC over ORIGINAL: {critic_improvement_over_original:.2f}%")
+        print(f"Improvement of BASELINE over ORIGINAL: {no_critic_improvement_over_original:.2f}%")
+        print(f"Better Method between CRITIC and BASELINE: {results['comparison']['better_method_bw_critic_baseline']}")
+        print(f"Better method between CRITIC and ORIGINAL: {results['comparison']['better_method_bw_critic_original']}")
+        print(f"\nCRITIC job durations: {results['with_critic']['job_durations']}")
+        print(f"BASELINE job durations: {results['without_critic']['job_durations']}")
+        print(f"CRITIC job durations: {results['original_model']['job_durations']}")
+        print('\n ------------------------------------------')
+
+        return results
+    
+    def _evaluate_single_model(self, scheduler, env_cfg: dict, num_episodes: int = 10) -> dict:
+        import gymnasium as gym
+        import spark_sched_sim  # Import to register the environment
+
+        eval_env = gym.make('spark_sched_sim:SparkSchedSimEnv-v0', env_cfg=env_cfg)
+
+        if scheduler.env_wrapper_cls:
+            eval_env = scheduler.env_wrapper_cls(eval_env)
+
+        torch.manual_seed(self.seed)
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+
+        rewards, job_durations = [], []
+
+        for episode in range(num_episodes):
+            obs, _ = eval_env.reset(seed=(self.seed + episode), options=None) #for getting different obs each time
+            print(f'seed: {self.seed + episode}')
+            done = False
+            ep_reward = 0
+
+            while not done:
+                action, _ = scheduler.schedule(obs)
+                obs, reward, term, trunc, info = eval_env.step(action)
+                # here the reward is -(sum of the ages of all active jobs)
+                done = term or trunc
+                ep_reward += reward
+
+            avg_job_duration = metrics.avg_job_duration(eval_env) * 1e-3
+            job_durations.append(avg_job_duration)
+            rewards.append(ep_reward)
+
+        eval_env.close()
+
+        return {
+            'avg_job_duration': np.mean(job_durations),
+            'std_job_duration': np.std(job_durations),
+            'avg_reward': np.mean(rewards),
+            'std_reward': np.std(rewards),
+            'job_durations': job_durations,
+            'rewards': rewards
+        }
