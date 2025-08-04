@@ -4,8 +4,31 @@ __pycache__/
 *.egg-info/
 .DS_Store
 
+# Training artifacts and logs
 artifacts/
+test/artifacts/
+logs/
+stdout/
+tb/
+*.log
+
+# Data files
 data/
+
+# Virtual environments
+spark-sim-env/
+venv/
+env/
+
+# Python compiled files
+*.pyc
+*.pyo
+
+# IDE files
+.vscode/settings.json
+.idea/
+
+# Temporary files
 count_params.py
 eval*
-test/old_test.py
+# Model files and chec
