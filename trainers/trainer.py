@@ -16,6 +16,7 @@ import torch
 import multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 from spark_sched_sim import metrics
+import matplotlib.pyplot as plt
 
 from schedulers import make_scheduler, TrainableScheduler
 from .rollout_worker import RolloutWorkerSync, RolloutWorkerAsync, RolloutBuffer
@@ -26,7 +27,7 @@ CfgType = dict[str, Any]
 
 ENV_CFG = {
     "num_executors": 50,
-    "job_arrival_cap": 50,
+    "job_arrival_cap": 500,
     "job_arrival_rate": 4.0e-5,
     "moving_delay": 2000.0,
     "warmup_delay": 1000.0,
@@ -54,7 +55,10 @@ class Trainer(ABC):
 
         # number of training iterations
         self.num_iterations: int = train_cfg["num_iterations"]
-
+        self.actor_loss_history = []
+        self.critic_loss_history = []
+        self.entropy_loss_history = []
+        self.kl_div_history = []
         # number of unique job sequences per iteration
         self.num_sequences: int = train_cfg["num_sequences"]
 
@@ -145,6 +149,11 @@ class Trainer(ABC):
 
             # update parameters
             learning_stats = self.train_on_rollouts(rollout_buffers)
+            if learning_stats:
+                self.actor_loss_history.append(learning_stats.get("policy_loss", 0))
+                self.critic_loss_history.append(learning_stats.get("meta_critic_loss", 0))
+                self.entropy_loss_history.append(learning_stats.get("entropy_loss", 0))
+                self.kl_div_history.append(learning_stats.get("approx_kl_div", 0))
 
             # return params to CPU before scattering updated state dict to the rollout workers
             self.scheduler.to("cpu", non_blocking=True)
@@ -172,6 +181,7 @@ class Trainer(ABC):
                 flush=True,
             )
 
+        self._plot_and_save_losses()
         self._cleanup()
 
         if exception:
@@ -349,6 +359,48 @@ class Trainer(ABC):
 
         for name, stat in episode_stats.items():
             self.summary_writer.add_scalar(name, stat, epoch)
+
+    def _plot_and_save_losses(self):
+        """
+        Plots the training losses for actor and critic and saves the figure.
+        """
+        if not self.actor_loss_history and not self.critic_loss_history:
+            print("No loss history to plot.")
+            return
+
+        iterations = range(1, len(self.actor_loss_history) + 1)
+
+        plt.style.use('seaborn-v0_8-whitegrid')
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+        fig.suptitle('Training Performance', fontsize=16)
+
+        # Plot Actor Losses
+        ax1.plot(iterations, self.actor_loss_history, label='Policy (Actor) Loss', color='dodgerblue')
+        ax1.set_ylabel('Policy Loss')
+        ax1.legend(loc='upper left')
+        ax1.set_title('Actor Performance')
+
+        # Create a second y-axis for Entropy and KL
+        ax1_twin = ax1.twinx()
+        ax1_twin.plot(iterations, self.entropy_loss_history, label='Entropy Loss', color='mediumseagreen', linestyle='--')
+        ax1_twin.plot(iterations, self.kl_div_history, label='Approx KL Divergence', color='orange', linestyle=':')
+        ax1_twin.set_ylabel('Entropy / KL')
+        ax1_twin.legend(loc='upper right')
+
+        # Plot Critic Loss
+        ax2.plot(iterations, self.critic_loss_history, label='Meta-Critic Loss', color='crimson')
+        ax2.set_xlabel('Training Iterations')
+        ax2.set_ylabel('Critic Loss (MSE)')
+        ax2.legend()
+        ax2.set_title('Critic Performance')
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        
+        # Save the plot to the project root directory
+        plot_path = 'training_losses1.png'
+        plt.savefig(plot_path)
+        print(f"Loss plot saved to {plot_path}")
+        plt.close(fig)
 
 
     def train_and_compare_models(self, train_cfg: dict, agent_cfg: dict, env_cfg: dict) -> dict:

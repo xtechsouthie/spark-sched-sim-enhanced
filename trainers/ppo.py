@@ -141,7 +141,7 @@ class PPO(Trainer):
         if self.use_meta_critic and hasattr(self, "meta_critic"):
             meta_critic_loss = self._train_meta_critic(data)
             training_metrics.update({
-                "meta critic loss": meta_critic_loss
+                "meta_critic_loss": meta_critic_loss
             })
 
         self.current_iteration += 1
@@ -161,6 +161,7 @@ class PPO(Trainer):
             for obsns, actions, advgs, old_lgprobs in dataloader:
                 loss, info = self._compute_loss(obsns, actions, advgs, old_lgprobs)
 
+                print(f"actor loss: {loss}")
                 kl = info["approx_kl_div"]
 
                 policy_losses += [info["policy_loss"]]

@@ -57,6 +57,7 @@ class MetaCritic:
         self.network = MetaCriticNetwork(self.input_dim, self.hidden_dim1, self.hidden_dim2)
         self.optimizer = optim.Adam(self.network.parameters(), lr=self.lr)
         self.loss_fn = nn.MSELoss()
+        self.k_shots = 5
         #update for max grad norm.
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -124,11 +125,11 @@ class MetaCritic:
     
     def _adapt(self, features, returns):
 
-        original_params = OrderedDict(self.network.named_parameters())
+        adapted_params = OrderedDict(self.network.named_parameters())
 
-        loss, grads = self.compute_loss_and_grad(features, returns, original_params)
-
-        adapted_params = self._param_update(original_params, grads, self.inner_lr)
+        for _ in range(self.k_shots):
+            loss, grads = self.compute_loss_and_grad(features, returns, adapted_params)
+            adapted_params = self._param_update(adapted_params, grads, self.inner_lr)
 
         return adapted_params
     

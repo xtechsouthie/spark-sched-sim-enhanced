@@ -9,8 +9,8 @@ import numpy as np
 import random
 
 ENV_CFG = {
-    "num_executors": 10,
-    "job_arrival_cap": 50,
+    "num_executors": 50,
+    "job_arrival_cap": 1000,
     "job_arrival_rate": 4.0e-5,
     "moving_delay": 2000.0,
     "warmup_delay": 1000.0,
